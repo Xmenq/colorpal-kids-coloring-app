@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { computeEdgeMagnitudes, magnitudesToLineArt, type LineArtOptions } from '@/lib/image-processor';
+import { assessLineArtQuality, computeEdgeMagnitudes, magnitudesToLineArt, type LineArtOptions } from '@/lib/image-processor';
 import { floodFill, hexToRgb } from '@/lib/flood-fill';
 import {
   Paintbrush, Droplets, Upload, Download, RotateCcw,
@@ -33,9 +33,9 @@ type Tool = 'brush' | 'bucket' | 'eraser';
 type AgePreset = 'simple' | 'medium' | 'detailed';
 
 const AGE_PRESETS: Record<AgePreset, { label: string; ages: string; threshold: number; options: LineArtOptions }> = {
-  simple:   { label: 'Simple',   ages: '4–5', threshold: 70, options: { closingRadius: 1, minRegionArea: 100, lineThickness: 1 } },
-  medium:   { label: 'Medium',   ages: '6–7', threshold: 50, options: { closingRadius: 1, minRegionArea: 60, lineThickness: 1 } },
-  detailed: { label: 'Detailed', ages: '8–10', threshold: 30, options: { closingRadius: 1, minRegionArea: 30, lineThickness: 0 } },
+  simple:   { label: 'Easy',      ages: '4–6', threshold: 70, options: { closingRadius: 1, minRegionArea: 100, lineThickness: 1 } },
+  medium:   { label: 'Balanced',  ages: '7–10', threshold: 50, options: { closingRadius: 1, minRegionArea: 60, lineThickness: 1 } },
+  detailed: { label: 'Detailed',  ages: '11–13', threshold: 30, options: { closingRadius: 1, minRegionArea: 30, lineThickness: 0 } },
 };
 
 export default function ColoringApp() {
@@ -56,6 +56,7 @@ export default function ColoringApp() {
   const [lineArtOpts, setLineArtOpts] = useState<LineArtOptions>(AGE_PRESETS.medium.options);
   const [edgeData, setEdgeData] = useState<{ magnitudes: Float32Array; width: number; height: number } | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [lineQualityScore, setLineQualityScore] = useState<number | null>(null);
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [originalImageData, setOriginalImageData] = useState<{ imageData: ImageData; width: number; height: number } | null>(null);
 
@@ -496,6 +497,7 @@ export default function ColoringApp() {
 
     setEdgeData(null);
     setPreviewUrl(null);
+    setLineQualityScore(null);
 
     const img = new Image();
     const objectUrl = URL.createObjectURL(file);
@@ -538,11 +540,20 @@ export default function ColoringApp() {
 
         const internalThreshold = 255 * (1 - threshold / 100);
         const lineArt = magnitudesToLineArt(edges.magnitudes, width, height, internalThreshold, lineArtOpts);
+        const quality = assessLineArtQuality(lineArt);
+        setLineQualityScore(Math.round(quality.score));
         const prevCanvas = document.createElement('canvas');
         prevCanvas.width = width;
         prevCanvas.height = height;
         prevCanvas.getContext('2d')!.putImageData(lineArt, 0, 0);
         setPreviewUrl(prevCanvas.toDataURL());
+
+        if (quality.score < 60) {
+          toast({
+            title: 'Try simpler lines',
+            description: 'This image has tiny areas that can be hard to color. Try Easy style or move the slider left.',
+          });
+        }
       } catch {
         toast({ title: 'Processing failed', description: 'Could not convert this image.', variant: 'destructive' });
       }
@@ -555,6 +566,8 @@ export default function ColoringApp() {
     const { magnitudes, width, height } = edgeData;
     const internalThreshold = 255 * (1 - threshold / 100);
     const lineArt = magnitudesToLineArt(magnitudes, width, height, internalThreshold, lineArtOpts);
+    const quality = assessLineArtQuality(lineArt);
+    setLineQualityScore(Math.round(quality.score));
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -583,6 +596,7 @@ export default function ColoringApp() {
     const lineArtBuf = lineArtBufRef.current;
     if (!lineArtBuf) return;
     const lineArtCtx = lineArtBuf.getContext('2d')!;
+    lineArtCtx.imageSmoothingEnabled = false;
     lineArtCtx.clearRect(0, 0, cw, ch);
     lineArtCtx.drawImage(tempCanvas, ox, oy, sw, sh);
 
@@ -592,15 +606,38 @@ export default function ColoringApp() {
       imgData.data[i] = 0;
       imgData.data[i + 1] = 0;
       imgData.data[i + 2] = 0;
-      imgData.data[i + 3] = Math.round(Math.max(0, 255 - brightness));
+      const alpha = Math.round(Math.max(0, 255 - brightness));
+      imgData.data[i + 3] = alpha > 0 ? Math.max(alpha, 110) : 0;
     }
     lineArtCtx.putImageData(imgData, 0, 0);
 
     const mask = new Uint8Array(cw * ch);
     for (let i = 0; i < cw * ch; i++) {
-      mask[i] = imgData.data[i * 4 + 3] > 80 ? 1 : 0;
+      mask[i] = imgData.data[i * 4 + 3] > 40 ? 1 : 0;
     }
-    boundaryMaskRef.current = mask;
+
+    const grownMask = new Uint8Array(mask.length);
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        const idx = y * cw + x;
+        if (mask[idx] === 1) {
+          grownMask[idx] = 1;
+          continue;
+        }
+
+        let nearLine = false;
+        for (let dy = -1; dy <= 1 && !nearLine; dy++) {
+          for (let dx = -1; dx <= 1 && !nearLine; dx++) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= cw || ny < 0 || ny >= ch) continue;
+            if (mask[ny * cw + nx] === 1) nearLine = true;
+          }
+        }
+        grownMask[idx] = nearLine ? 1 : 0;
+      }
+    }
+    boundaryMaskRef.current = grownMask;
 
     const drawBuf = drawBufRef.current;
     if (drawBuf) {
@@ -624,6 +661,7 @@ export default function ColoringApp() {
     setUploadOpen(false);
     setEdgeData(null);
     setPreviewUrl(null);
+    setLineQualityScore(null);
     setOriginalImageUrl(null);
     setOriginalImageData(null);
     toast({ title: 'Coloring page ready!', description: 'Start coloring inside the lines.' });
@@ -686,6 +724,7 @@ export default function ColoringApp() {
     setUploadOpen(false);
     setEdgeData(null);
     setPreviewUrl(null);
+    setLineQualityScore(null);
     setOriginalImageUrl(null);
     setOriginalImageData(null);
     toast({ title: 'Image loaded!', description: 'Paint between the lines. Stay in Lines mode is on.' });
@@ -1317,6 +1356,11 @@ export default function ColoringApp() {
                       <span>Fewer lines</span>
                       <span>More lines</span>
                     </div>
+                    {lineQualityScore !== null && (
+                      <div className="mt-2 text-[11px] text-gray-500">
+                        Coloring ease score: <span className="font-semibold text-violet-600">{lineQualityScore}/100</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

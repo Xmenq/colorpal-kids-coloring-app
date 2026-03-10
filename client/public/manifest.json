@@ -1,0 +1,19 @@
+{
+  "name": "ColorPal - Coloring App for Kids",
+  "short_name": "ColorPal",
+  "description": "A fun coloring app for children. Upload images, convert to coloring pages, and paint inside the lines!",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ffffff",
+  "theme_color": "#8B5CF6",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "categories": ["kids", "education", "entertainment"]
+}

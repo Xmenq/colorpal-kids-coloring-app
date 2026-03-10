@@ -4,6 +4,13 @@ export interface LineArtOptions {
   lineThickness?: number;
 }
 
+export interface LineArtQuality {
+  score: number;
+  lineCoverage: number;
+  enclosedRegions: number;
+  tinyRegions: number;
+}
+
 export function computeEdgeMagnitudes(imageData: ImageData): {
   magnitudes: Float32Array;
   width: number;
@@ -180,6 +187,83 @@ export function generateBoundaryMask(canvasCtx: CanvasRenderingContext2D, w: num
     mask[i] = (imgData.data[i * 4 + 3] > 128 && imgData.data[i * 4] < 128) ? 1 : 0;
   }
   return mask;
+}
+
+export function assessLineArtQuality(lineArt: ImageData, tinyRegionLimit = 90): LineArtQuality {
+  const { width, height, data } = lineArt;
+  const size = width * height;
+  const lineMask = new Uint8Array(size);
+  let linePixels = 0;
+
+  for (let i = 0; i < size; i++) {
+    const brightness = (data[i * 4] + data[i * 4 + 1] + data[i * 4 + 2]) / 3;
+    if (brightness < 140) {
+      lineMask[i] = 1;
+      linePixels++;
+    }
+  }
+
+  const visited = new Uint8Array(size);
+  let enclosedRegions = 0;
+  let tinyRegions = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const start = y * width + x;
+      if (visited[start] || lineMask[start]) continue;
+
+      const stack: number[] = [x, y];
+      visited[start] = 1;
+      let regionArea = 0;
+      let touchesBorder = false;
+
+      while (stack.length > 0) {
+        const cy = stack.pop()!;
+        const cx = stack.pop()!;
+        const idx = cy * width + cx;
+        regionArea++;
+
+        if (cx === 0 || cy === 0 || cx === width - 1 || cy === height - 1) {
+          touchesBorder = true;
+        }
+
+        const neighbors = [
+          [cx - 1, cy], [cx + 1, cy],
+          [cx, cy - 1], [cx, cy + 1],
+        ];
+
+        for (const [nx, ny] of neighbors) {
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const ni = ny * width + nx;
+          if (visited[ni] || lineMask[ni]) continue;
+          visited[ni] = 1;
+          stack.push(nx, ny);
+        }
+      }
+
+      if (!touchesBorder) {
+        enclosedRegions++;
+        if (regionArea < tinyRegionLimit) tinyRegions++;
+      }
+    }
+  }
+
+  const lineCoverage = linePixels / size;
+  const tinyRatio = enclosedRegions > 0 ? tinyRegions / enclosedRegions : 0;
+  const densityPenalty = lineCoverage < 0.04
+    ? (0.04 - lineCoverage) * 900
+    : lineCoverage > 0.35
+      ? (lineCoverage - 0.35) * 500
+      : 0;
+  const tinyPenalty = tinyRatio * 55;
+  const score = Math.max(0, Math.min(100, 100 - densityPenalty - tinyPenalty));
+
+  return {
+    score,
+    lineCoverage,
+    enclosedRegions,
+    tinyRegions,
+  };
 }
 
 function autoContrast(gray: Float32Array): Float32Array {
